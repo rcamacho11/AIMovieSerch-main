@@ -18,7 +18,12 @@ entity_style = {
     "color": "#0066CC"
 }
 
-entities = ["Movie", "Genre", "Actor", "Director", "Rating"]
+entities = [
+    "Movie", "ReleaseYear", "Rating", "Synopsis", "StorylineVec",
+    "Genre", "Actor",
+    "Director", "Title", "AltTitle",
+    #"MovieGenre","MovieDirector", "MovieActor"
+]
 
 for e in entities:
     dot.node(e, e, **entity_style)
@@ -29,11 +34,21 @@ for e in entities:
 attr_style = {"shape": "ellipse", "fontcolor": "#333333", "fontsize": "10"}
 
 attributes = {
-    "Movie": ["movie_id (PK)", "primary_title", "title", "release_year"],
-    "Genre": ["genre_id (PK)", "name"],
-    "Actor": ["actor_id (PK)", "name"],
-    "Director": ["director_id (PK)", "name"],
+    "Movie": [
+    ],
+    "ReleaseYear": ["year_id (PK)", "year"],
     "Rating": ["rating_id (PK)", "score"],
+    "Synopsis": ["synopsis_id (PK)", "desc", "storylinevec_id (FK → StorylineVec.storylinevec_id)"],
+    "StorylineVec": ["storylinevec_id (PK)", "vectors (BLOB/TEXT)"],
+    "Genre": ["genre_id (PK)", "genres"],
+    #"MovieGenre": ["movie_id (FK → Movie.movie_id)", "genre_id (FK → Genre.genre_id)", "PK = (movie_id, genre_id)"],
+    "Actor": ["actor_id (PK)", "name"],
+    #"MovieActor": ["movie_id (FK → Movie.movie_id)", "actor_id (FK → Actor.actor_id)", "PK = (movie_id, actor_id)"],
+    "Director": ["director_id (PK)", "name"],
+    #"MovieDirector": ["movie_id (FK → Movie.movie_id)", "director_id (FK → Director.director_id)", "PK = (movie_id,      
+    # director_id)"],
+    "Title": ["title_id (PK)", "title"],
+    "AltTitle": ["alttitle_id (PK)", "alttitle", "title_id (FK → Title.title_id)"]
 }
 
 for entity, attrs in attributes.items():
@@ -53,20 +68,23 @@ rel_style = {
     "fontsize": "11"
 }
 
-# Define relationships (Movie ↔ Other)
 relationships = [
+    ("Movie", "ReleaseYear", "Has_Year"),
+    ("Movie", "Rating", "Has_Rating"),
+    ("Movie", "Synopsis", "Has_Synopsis"),
+    ("Movie", "StorylineVec", "Has_Vector"),
+    ("Movie", "Title", "Has_Title"),
+    ("Title", "AltTitle", "Has_AltTitle"),
     ("Movie", "Genre", "Has_Genre"),
     ("Movie", "Actor", "Has_Actor"),
-    ("Movie", "Director", "Directed_By"),
-    ("Movie", "Rating", "Has_Rating")
+    ("Movie", "Director", "Directed_By")
 ]
 
 for (e1, e2, rel) in relationships:
     rel_label = rel.replace("_", " ")
     dot.node(rel, rel_label, **rel_style)
-    # Movie to Relationship (1)
+    # 1→M edges
     dot.edge(e1, rel, dir="forward", arrowhead="normal", color="#333333")
-    # Relationship to other entity (many)
     dot.edge(rel, e2, dir="forward", arrowhead="crow", color="#333333")
 
 # ============================================================
@@ -74,4 +92,3 @@ for (e1, e2, rel) in relationships:
 # ============================================================
 output_file = dot.render()
 print(f"✅ ERD generated successfully at: {output_file}")
-

@@ -1,74 +1,93 @@
 import os
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 import requests
 import sqlite3
-import faiss
-import joblib
 from urllib.parse import quote
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import normalize
 from spellchecker import SpellChecker
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import torch
+import nltk
+nltk.download("punkt")
 
+# ---------------------------------------------------------
+# Optimize for Mac M-series (avoid segfaults)
+# ---------------------------------------------------------
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+torch.set_num_threads(1)
+
+# ---------------------------------------------------------
+# Streamlit setup
+# ---------------------------------------------------------
 st.set_page_config(page_title="🎬 Movie Storyline Search", layout="wide")
 
 TMDB_API_KEY = "2475813c017e111b42f69d3d5b8149c7"
-DB_PATH = "movies.db"
-
-INDEX_PATH = "faiss_index.bin"
-VEC_PATH = "tfidf_vectorizer.pkl"
-VEC_ARRAY_PATH = "storyline_vectors.npy"
+DB_PATH = "movies.sqlite"
 
 spell = SpellChecker()
 
+# ---------------------------------------------------------
+# SPELL CHECKER (fixed to preserve punctuation)
+# ---------------------------------------------------------
 def clean_query(text: str) -> str:
-    """Fix simple spelling errors."""
-    words = text.split()
-    corrected = [spell.correction(w) if spell.correction(w) else w for w in words]
-    return " ".join(corrected)
+    """
+    Corrects spelling for words only — keeps punctuation intact.
+    Prevents the last period or commas from being removed.
+    """
+    words = re.findall(r"\w+|[^\w\s]", text, re.UNICODE)
+    corrected = []
+    for w in words:
+        if re.match(r"\w+", w):  # only correct actual words
+            corr = spell.correction(w)
+            corrected.append(corr if corr else w)
+        else:
+            corrected.append(w)  # leave punctuation untouched
+    return "".join(
+        [" " + w if not re.match(r"[,.!?;:]", w) and i != 0 else w for i, w in enumerate(corrected)]
+    ).strip()
 
-# LOAD DATA FROM SQLITE
+# ---------------------------------------------------------
+# LOAD DATA + STORED EMBEDDINGS
+# ---------------------------------------------------------
 @st.cache_data(show_spinner=True)
 def load_data_from_db():
-    if not os.path.exists(DB_PATH):
-        st.error(f"Database file not found: {DB_PATH}")
-        st.stop()
-
     conn = sqlite3.connect(DB_PATH)
-
-    # --- Load IMDb info ---
-    imdb = pd.read_sql("""
+    query = """
         SELECT 
-            "Primary Title" AS primary_title,
-            "Release Year" AS release_year,
-            "Genre(s)" AS genres,
-            Title AS title
-        FROM imdb
-    """, conn)
+            t.Title,
+            t.Primary_Title,
+            ry.Release_Year,
+            g.Genre,
+            r.IMDb_Rating,
+            n.Number_of_Ratings,
+            s.Synopsis
+        FROM title t
+        LEFT JOIN release_year ry ON t.Title = ry.Title
+        LEFT JOIN genre g ON t.Title = g.Title
+        LEFT JOIN rating r ON t.Title = r.Title
+        LEFT JOIN num_ratings n ON t.Title = n.Title
+        LEFT JOIN synopsis s ON t.Title = s.Title
+        GROUP BY t.Title
+        ORDER BY ry.Release_Year DESC;
+    """
+    metadata = pd.read_sql_query(query, conn)
 
-    # --- Load ratings (optional) ---
-    try:
-        ratings = pd.read_sql("SELECT rating FROM ratings", conn)
-    except Exception:
-        ratings = None
-
+    vectors_df = pd.read_sql_query("SELECT * FROM storyline_vector;", conn)
     conn.close()
 
-    # Define column references (no autodetect)
-    TITLE_COL = "primary_title"
-    SYN_COL = "title"        # using Title as fallback storyline/description
-    ID_COL = "rowid"         # implicit SQLite row id for indexing
-    GENRES_COL = "genres"
-    YEAR_COL = "release_year"
+    titles = vectors_df["Title"].tolist()
+    vectors = vectors_df.drop(columns=["Title"]).to_numpy(dtype=np.float32)
+    vectors /= np.clip(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-9, None)
 
-    return imdb, ID_COL, TITLE_COL, SYN_COL, GENRES_COL, YEAR_COL, ratings
+    return metadata, titles, vectors
 
-
-# Call once
-imdb, ID_COL, TITLE_COL, SYN_COL, GENRES_COL, YEAR_COL, RATINGS = load_data_from_db()
-
+# ---------------------------------------------------------
 # TMDB POSTER FETCH
+# ---------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def get_poster_tmdb(title):
     try:
@@ -85,37 +104,25 @@ def get_poster_tmdb(title):
         pass
     return "https://upload.wikimedia.org/wikipedia/commons/6/65/No-Image-Placeholder.svg"
 
-# LOAD OR BUILD FAISS INDEX (silent, cached)
-@st.cache_resource(show_spinner=False)
-def load_faiss_index(df, title_col, syn_col):
-    if os.path.exists(INDEX_PATH) and os.path.exists(VEC_PATH) and os.path.exists(VEC_ARRAY_PATH):
-        index = faiss.read_index(INDEX_PATH)
-        vectorizer = joblib.load(VEC_PATH)
-        X_norm = np.load(VEC_ARRAY_PATH)
-        return vectorizer, index, X_norm
-    else:
-        # Build silently, no Streamlit messages
-        text = (df[title_col].fillna("") + " " + df[syn_col].fillna("")).tolist()
-        vectorizer = TfidfVectorizer(
-            stop_words="english",
-            max_features=200_000,
-            ngram_range=(1, 2)
-        )
-        X = vectorizer.fit_transform(text).astype(np.float32)
-        X_norm = normalize(X, norm="l2").toarray()
-        d = X_norm.shape[1]
-        index = faiss.IndexFlatIP(d)
-        index.add(X_norm)
-        faiss.write_index(index, INDEX_PATH)
-        joblib.dump(vectorizer, VEC_PATH)
-        np.save(VEC_ARRAY_PATH, X_norm)
-        return vectorizer, index, X_norm
+# ---------------------------------------------------------
+# LOAD FIXED GTE MODEL
+# ---------------------------------------------------------
+@st.cache_resource(show_spinner=True)
+def load_gte_model():
+    model_name = "Alibaba-NLP/gte-base-en-v1.5"
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    st.info(f"📘 Using fixed model: {model_name} on {device.upper()}")
+    model = SentenceTransformer(model_name, trust_remote_code=True, device=device)
+    return model
 
-VEC, INDEX, X_NORM = load_faiss_index(imdb, TITLE_COL, SYN_COL)
+# ---------------------------------------------------------
+# MAIN APP
+# ---------------------------------------------------------
+imdb, title_list, EMBEDDINGS = load_data_from_db()
+MODEL = load_gte_model()
 
-# UI
-st.title("🎬 AI Movie Search")
-st.write("Powered by FAISS")
+st.title("🎬 AI Movie Search (GTE-Base-EN Only)")
+st.write("Find similar movies by storyline — using fixed Alibaba GTE embeddings (768-D).")
 
 query = st.text_area(
     "Enter your movie storyline:",
@@ -124,57 +131,46 @@ query = st.text_area(
 )
 top_k = st.slider("Number of results", 1, 50, 25, step=1)
 
+# ---------------------------------------------------------
+# SEARCH
+# ---------------------------------------------------------
 if st.button("Search"):
     if not query.strip():
         st.warning("Please enter a storyline.")
     else:
-        corrected_query = clean_query(query)
-        if corrected_query.strip().lower() != query.strip().lower():
-            st.info(f"💡 Did you mean: `{corrected_query}`")
-        else:
-            corrected_query = query
+        corrected = clean_query(query)
+        if corrected.lower() != query.lower():
+            st.info(f"💡 Did you mean: `{corrected}`")
 
-        with st.spinner("Searching with FAISS..."):
-            q_vec = VEC.transform([corrected_query]).astype(np.float32)
-            q_vec = normalize(q_vec, norm="l2").toarray()
-            D, I = INDEX.search(q_vec, top_k)
-            top_idx = I[0]
-            sims = D[0]
+        with st.spinner("Searching similar storylines..."):
+            q_vec = MODEL.encode([corrected], normalize_embeddings=True)
+            sims = cosine_similarity(q_vec, EMBEDDINGS)[0]
+            top_idx = np.argsort(-sims)[:top_k]
+            top_scores = sims[top_idx]
 
-        st.subheader("Search Results")
+        st.subheader("🔍 Search Results")
 
         num_cols = 5
         for i in range(0, len(top_idx), num_cols):
             cols = st.columns(num_cols)
             for col, idx in zip(cols, top_idx[i:i + num_cols]):
                 row = imdb.iloc[idx]
-                title = row.get(TITLE_COL, "Unknown Title")
-                year = row.get(YEAR_COL, "")
-                synopsis = row.get(SYN_COL, "No synopsis available.")
-                genres = row.get(GENRES_COL, "N/A")
-                imdb_id = row.get(ID_COL, "")
-
-                # ratings (safe)
-                if RATINGS is not None and idx < len(RATINGS):
-                    try:
-                        rating = round(float(RATINGS.iloc[idx, 0]), 2)
-                    except Exception:
-                        rating = None
-                else:
-                    rating = None
-
-                similarity = int(float(sims[np.where(top_idx == idx)[0][0]]) * 100)
+                title = row.get("Primary_Title", "Unknown Title")
+                year = row.get("Release_Year", "")
+                synopsis = row.get("Synopsis", "No synopsis available.")
+                genre = row.get("Genre", "N/A")
+                rating = row.get("IMDb_Rating", None)
+                num_ratings = row.get("Number_of_Ratings", None)
+                similarity = int(top_scores[np.where(top_idx == idx)[0][0]] * 100)
                 poster_url = get_poster_tmdb(title)
-                imdb_link = f"https://www.imdb.com/title/{imdb_id}" if str(imdb_id).startswith("tt") else None
 
                 with col:
                     st.image(poster_url, caption=f"{title} ({year})", use_column_width=True)
                     with st.expander("More info"):
-                        st.markdown(f"**⭐ IMDb Rating:** {rating if rating else 'N/A'}")
+                        st.markdown(f"**⭐ IMDb Rating:** {round(rating, 2) if rating else 'N/A'}")
+                        st.markdown(f"**👥 Ratings Count:** {int(num_ratings) if num_ratings else 'N/A'}")
                         st.markdown(f"**🧮 Similarity:** {similarity}%")
-                        st.markdown(f"**🎭 Genres:** {genres}")
+                        st.markdown(f"**🎭 Genre:** {genre}")
                         st.markdown(f"**📖 Synopsis:** {synopsis}")
-                        if imdb_link:
-                            st.markdown(f"[View on IMDb]({imdb_link})")
 
-st.caption("CSE111: Richard Camacho, Akshaya Natarajan, and Ailisha Shukla")
+st.caption("CSE111 — Richard Camacho, Akshaya Natarajan & Ailisha Shukla · Fixed Alibaba GTE Embeddings")
