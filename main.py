@@ -165,7 +165,7 @@ if st.button("Search"):
                 poster_url = get_poster_tmdb(title)
 
                 with col:
-                    st.image(poster_url, caption=f"{title} ({year})", use_column_width=True)
+                    st.image(poster_url, caption=f"{title} ({year})", use_container_width=True)
                     with st.expander("More info"):
                         st.markdown(f"**⭐ IMDb Rating:** {round(rating, 2) if rating else 'N/A'}")
                         st.markdown(f"**👥 Ratings Count:** {int(num_ratings) if num_ratings else 'N/A'}")
