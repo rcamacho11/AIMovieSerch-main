@@ -64,16 +64,20 @@ def load_data_from_db():
             g.Genre,
             r.IMDb_Rating,
             n.Number_of_Ratings,
-            s.Synopsis
+            s.Synopsis,
+            tc.Category AS title_category,
+            tj.Job_Category AS title_job
         FROM title t
         LEFT JOIN release_year ry ON t.Title = ry.Title
         LEFT JOIN genre g ON t.Title = g.Title
         LEFT JOIN rating r ON t.Title = r.Title
         LEFT JOIN num_ratings n ON t.Title = n.Title
         LEFT JOIN synopsis s ON t.Title = s.Title
-        GROUP BY t.Title
+        LEFT JOIN title_category tc ON t.Title = tc.Title
+        LEFT JOIN title_job tj ON t.Title = tj.Title
         ORDER BY ry.Release_Year DESC;
     """
+
     metadata = pd.read_sql_query(query, conn)
 
     vectors_df = pd.read_sql_query("SELECT * FROM storyline_vector;", conn)
@@ -160,6 +164,8 @@ if st.button("Search"):
                 synopsis = row.get("Synopsis", "No synopsis available.")
                 genre = row.get("Genre", "N/A")
                 rating = row.get("IMDb_Rating", None)
+                job = row.get("title_job", "N/A")
+                category = row.get("title_category", "N/A")
                 num_ratings = row.get("Number_of_Ratings", None)
                 similarity = int(top_scores[np.where(top_idx == idx)[0][0]] * 100)
                 poster_url = get_poster_tmdb(title)
@@ -172,5 +178,8 @@ if st.button("Search"):
                         st.markdown(f"**🧮 Similarity:** {similarity}%")
                         st.markdown(f"**🎭 Genre:** {genre}")
                         st.markdown(f"**📖 Synopsis:** {synopsis}")
+                        st.markdown(f"**Job:** {job}")
+                        st.markdown(f"**Category:** {category}")
+
 
 st.caption("CSE111 — Richard Camacho, Akshaya Natarajan & Ailisha Shukla · Fixed Alibaba GTE Embeddings")
