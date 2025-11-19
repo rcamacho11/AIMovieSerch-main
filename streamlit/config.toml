@@ -1,7 +1,6 @@
 [theme]
-primaryColor = "#3D4127"            # Olive-green accent (buttons, sliders, etc.)
-backgroundColor = "#FFFFFF"         # White background (needed 6-digit hex)
-secondaryBackgroundColor = "#D4DE95" # Light green-yellow for sidebar or widgets
-textColor = "#000000"               # Black text
-font = "sans serif"
-
+primaryColor="#FFB7CE"                # Baby pink (accent color)
+backgroundColor="#BDE0FE"             # Sky blue (main background)
+secondaryBackgroundColor="#FFEEF5"    # Very light pinkish background
+textColor="#2A2A2A"                    # Dark chocolate text (readable)
+font="century schoolbook"
