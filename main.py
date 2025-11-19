@@ -71,16 +71,23 @@ def load_data_from_db():
     conn = sqlite3.connect(DB_PATH)
 
     # Base metadata assembled from multiple tables
+    #1.
     title_df = pd.read_sql_query("SELECT Title, Primary_Title FROM title;", conn)
+    #2.
     year_df = pd.read_sql_query("SELECT Title, Release_Year FROM release_year;", conn)
+    #3.
     genre_df = pd.read_sql_query("SELECT Title, Genre FROM genre;", conn)
+    #4.
     rating_df = pd.read_sql_query("SELECT Title, IMDb_Rating FROM rating;", conn)
+    #5.
     num_df = pd.read_sql_query("SELECT Title, Number_of_Ratings FROM num_ratings;", conn)
+    #6.
     synopsis_df = pd.read_sql_query("SELECT Title, Synopsis FROM synopsis;", conn)
 
     # Optional tables (category, character) – may not have entries for every title
     try:
         category_df = pd.read_sql_query(
+            #7.
             "SELECT Title, Category AS category FROM category;", conn
         )
     except Exception:
@@ -88,6 +95,7 @@ def load_data_from_db():
 
     try:
         char_df = pd.read_sql_query(
+            #8.
             "SELECT Title, Character AS character FROM character;", conn
         )
     except Exception:
@@ -105,6 +113,7 @@ def load_data_from_db():
     )
 
     # Load storyline vectors
+    #9.
     vectors_df = pd.read_sql_query("SELECT * FROM storyline_vector;", conn)
     conn.close()
 
@@ -212,8 +221,8 @@ page = st.sidebar.radio(
         "⭐ Top Rated Movies",
         "📅 Year Explorer",
         "📈 Popular Movies (Most Ratings)",
-        "📝 Keyword Synopsis Search",
-        "⚠️ Missing Data Report",
+        "➕ Add to the Catalogue",
+        "🛠️ Movie Record Manager",
         "📊 Analytics & Longest Synopses",
         "🎲 Random Movie",
     ],
@@ -278,6 +287,7 @@ elif page == "🎭 Browse by Genre":
     if genre != "(choose)":
         st.subheader(f"Movies in Genre: {genre}")
         df = run_sql(
+            #10.
             """
             SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre, r.IMDb_Rating,
                    n.Number_of_Ratings, s.Synopsis
@@ -307,6 +317,7 @@ elif page == "⭐ Top Rated Movies":
     if st.button("Show Top Rated"):
         df = run_sql(
             f"""
+            #11.
             SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre,
                    r.IMDb_Rating, n.Number_of_Ratings, s.Synopsis
             FROM title t
@@ -335,6 +346,7 @@ elif page == "📅 Year Explorer":
     if years:
         year = st.selectbox("Select a year:", years)
         df = run_sql(
+            #12.
             """
             SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre, r.IMDb_Rating,
                    n.Number_of_Ratings, s.Synopsis
@@ -364,6 +376,7 @@ elif page == "📈 Popular Movies (Most Ratings)":
 
     if st.button("Show Most Popular"):
         df = run_sql(
+            #13.
             f"""
             SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre,
                    r.IMDb_Rating, n.Number_of_Ratings, s.Synopsis
@@ -379,78 +392,6 @@ elif page == "📈 Popular Movies (Most Ratings)":
         )
         render_movie_grid(df)
 
-
-# ---------------------------------------------------------
-# PAGE: KEYWORD SYNOPSIS SEARCH
-# ---------------------------------------------------------
-elif page == "📝 Keyword Synopsis Search":
-    st.title("📝 Search in Synopsis")
-
-    keyword = st.text_input("Enter a keyword to search in synopses:")
-
-    if st.button("Search Synopses"):
-        if not keyword.strip():
-            st.warning("Please enter a keyword.")
-        else:
-            search_pattern = f"%{keyword.strip()}%"
-            df = run_sql(
-                """
-                SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre,
-                       r.IMDb_Rating, n.Number_of_Ratings, s.Synopsis
-                FROM synopsis s
-                JOIN title t ON s.Title = t.Title
-                LEFT JOIN release_year ry ON t.Title = ry.Title
-                LEFT JOIN genre g ON t.Title = g.Title
-                LEFT JOIN rating r ON t.Title = r.Title
-                LEFT JOIN num_ratings n ON t.Title = n.Title
-                WHERE s.Synopsis LIKE ?
-                ORDER BY r.IMDb_Rating DESC;
-                """,
-                params=(search_pattern,),
-            )
-            render_movie_grid(df)
-
-
-# ---------------------------------------------------------
-# PAGE: MISSING DATA REPORT
-# ---------------------------------------------------------
-elif page == "⚠️ Missing Data Report":
-    st.title("⚠️ Data Quality / Missing Data Report")
-
-    tab1, tab2, tab3 = st.tabs(["Missing Synopsis", "Missing Ratings", "Empty Genres"])
-
-    with tab1:
-        st.subheader("Movies with Missing Synopsis")
-        df1 = run_sql(
-            """
-            SELECT t.Title, t.Primary_Title
-            FROM title t
-            LEFT JOIN synopsis s ON t.Title = s.Title
-            WHERE s.Synopsis IS NULL OR s.Synopsis = '';
-            """
-        )
-        st.dataframe(df1)
-
-    with tab2:
-        st.subheader("Movies with Missing IMDb Rating")
-        df2 = run_sql(
-            """
-            SELECT t.Title, t.Primary_Title
-            FROM title t
-            LEFT JOIN rating r ON t.Title = r.Title
-            WHERE r.IMDb_Rating IS NULL;
-            """
-        )
-        st.dataframe(df2)
-
-    with tab3:
-        st.subheader("Entries with Empty Genre")
-        df3 = run_sql(
-            "SELECT Title, Genre FROM genre WHERE Genre IS NULL OR Genre = '';"
-        )
-        st.dataframe(df3)
-
-
 # ---------------------------------------------------------
 # PAGE: ANALYTICS & LONGEST SYNOPSES
 # ---------------------------------------------------------
@@ -459,6 +400,7 @@ elif page == "📊 Analytics & Longest Synopses":
 
     st.subheader("1. Movies with Multiple Genres")
     df_multi = run_sql(
+        #14. 
         """
         SELECT Title, COUNT(*) AS GenreCount
         FROM genre
@@ -471,6 +413,7 @@ elif page == "📊 Analytics & Longest Synopses":
 
     st.subheader("2. Movies Newer Than Average Release Year")
     df_newer = run_sql(
+        #15.
         """
         SELECT t.Title, t.Primary_Title, ry.Release_Year
         FROM release_year ry
@@ -484,6 +427,7 @@ elif page == "📊 Analytics & Longest Synopses":
 
     st.subheader("3. Movies Above Average IMDb Rating")
     df_above_avg = run_sql(
+        #16.
         """
         SELECT t.Title, t.Primary_Title, r.IMDb_Rating
         FROM rating r
@@ -497,6 +441,7 @@ elif page == "📊 Analytics & Longest Synopses":
 
     st.subheader("4. Top 10 Longest Synopses")
     df_long = run_sql(
+        #17.
         """
         SELECT t.Title, t.Primary_Title, LENGTH(s.Synopsis) AS Synopsis_Length
         FROM synopsis s
@@ -517,6 +462,7 @@ elif page == "🎲 Random Movie":
 
     if st.button("Give me a random movie"):
         df = run_sql(
+            #18.
             """
             SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre,
                    r.IMDb_Rating, n.Number_of_Ratings, s.Synopsis
@@ -533,3 +479,100 @@ elif page == "🎲 Random Movie":
         render_movie_grid(df, max_cols=1)
     else:
         st.info("Click the button to get a random recommendation!")
+        
+# ---------------------------------------------------------
+# PAGE: ADD TO THE CATALOGUE
+# ---------------------------------------------------------
+elif page == "➕ Add to the Catalogue":
+    st.title("➕ Add to the Catalogue")
+
+    title = st.text_input("Movie Title")
+    year = st.number_input("Release Year", min_value=1800, max_value=2100)
+    genre = st.text_input("Genre")
+    rating = st.number_input("IMDb Rating (0–10)", min_value=0.0, max_value=10.0, step=0.1)
+    synopsis = st.text_area("Synopsis")
+
+    if st.button("Add Movie"):
+        if title.strip() == "":
+            st.error("Title cannot be empty.")
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            try:
+                #19.
+                cur.execute("INSERT INTO title (Title, Primary_Title) VALUES (?, ?)", (title, title))
+                #20.
+                cur.execute("INSERT INTO release_year (Title, Release_Year) VALUES (?, ?)", (title, year))
+                #21.
+                cur.execute("INSERT INTO genre (Title, Genre) VALUES (?, ?)", (title, genre))
+                #22.
+                cur.execute("INSERT INTO rating (Title, IMDb_Rating) VALUES (?, ?)", (title, rating))
+                #23.
+                cur.execute("INSERT INTO synopsis (Title, Synopsis) VALUES (?, ?)", (title, synopsis))
+                conn.commit()
+                st.success(f"'{title}' has been successfully added!")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                conn.close()
+
+# ---------------------------------------------------------
+# PAGE: MOVIE RECORD MANAGER
+# ---------------------------------------------------------
+elif page == "🛠️ Movie Record Manager":
+    st.title("🛠️ Movie Record Manager")
+
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT Title FROM title ORDER BY Title ASC", conn)
+    conn.close()
+
+    if df.empty:
+        st.warning("No movies found in the database.")
+    else:
+        titles = df["Title"].tolist()
+        selected = st.selectbox("Choose a movie:", titles)
+
+        st.subheader("Update Movie Information")
+        new_title = st.text_input("New Title", value=selected)
+        new_rating = st.number_input("New Rating (0–10)", min_value=0.0, max_value=10.0, step=0.1)
+
+        if st.button("Update Movie"):
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                #24.
+                cur.execute("UPDATE title SET Primary_Title=? WHERE Title=?", (new_title, selected))
+                #25.
+                cur.execute("UPDATE rating SET IMDb_Rating=? WHERE Title=?", (new_rating, selected))
+                conn.commit()
+                st.success("Movie information updated!")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                conn.close()
+
+        st.divider()
+
+        st.subheader("Delete Movie Record")
+        st.warning("⚠️ This action cannot be undone!")
+
+        if st.button("Delete Movie"):
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                #26.
+                cur.execute("DELETE FROM rating WHERE Title=?", (selected,))
+                #27.
+                cur.execute("DELETE FROM genre WHERE Title=?", (selected,))
+                #28.
+                cur.execute("DELETE FROM release_year WHERE Title=?", (selected,))
+                #29.
+                cur.execute("DELETE FROM synopsis WHERE Title=?", (selected,))
+                #30.
+                cur.execute("DELETE FROM title WHERE Title=?", (selected,))
+                conn.commit()
+                st.success(f"'{selected}' has been deleted.")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                conn.close()
