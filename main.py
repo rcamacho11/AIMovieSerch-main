@@ -12,9 +12,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import torch
 import nltk
 
-# ---------------------------------------------------------
 # NLTK / ENV / TORCH SETUP
-# ---------------------------------------------------------
 try:
     nltk.download("punkt", quiet=True)
 except:
@@ -25,19 +23,16 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 torch.set_num_threads(1)
 
-# ---------------------------------------------------------
 # CONFIG
-# ---------------------------------------------------------
 st.set_page_config(page_title="🎬 Movie Storyline Search", layout="wide")
 
 TMDB_API_KEY = "2475813c017e111b42f69d3d5b8149c7"
+# IMPORTANT: this must match your DB builder script
 DB_PATH = "movies.sqlite"
 
 spell = SpellChecker()
 
-# ---------------------------------------------------------
 # HELPER: SPELL CHECKER
-# ---------------------------------------------------------
 def clean_query(text: str) -> str:
     words = re.findall(r"\w+|[^\w\s]", text, re.UNICODE)
     corrected = []
@@ -52,11 +47,9 @@ def clean_query(text: str) -> str:
     ).strip()
 
 
-# ---------------------------------------------------------
 # HELPER: DB ACCESS
-# ---------------------------------------------------------
 def run_sql(query: str, params=None) -> pd.DataFrame:
-    """Run a SQL query against movies.sqlite and return a DataFrame."""
+    """Run a SQL query against movies.db and return a DataFrame."""
     conn = sqlite3.connect(DB_PATH)
     try:
         df = pd.read_sql_query(query, conn, params=params)
@@ -67,53 +60,85 @@ def run_sql(query: str, params=None) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=True)
 def load_data_from_db():
-    """Load metadata and embeddings from the database."""
+    
+    """
+    Load metadata and embeddings from the database.
+    Uses many-to-many tables:
+        movie_genre + genre_ref
+        movie_category + category_ref
+        movie_character + character_ref
+        movie_job + job_ref
+    and storyline_vector for embeddings.
+    """
     conn = sqlite3.connect(DB_PATH)
 
-    # Base metadata assembled from multiple tables
-    #1.
+    # ---- Core base tables ----
+    # Query #1 (SELECT): Load title table
     title_df = pd.read_sql_query("SELECT Title, Primary_Title FROM title;", conn)
-    #2.
+    
+    # Query #2 (SELECT): Load release year table
     year_df = pd.read_sql_query("SELECT Title, Release_Year FROM release_year;", conn)
-    #3.
-    genre_df = pd.read_sql_query("SELECT Title, Genre FROM genre;", conn)
-    #4.
+    
+    # Query #3 (SELECT): Load rating table
     rating_df = pd.read_sql_query("SELECT Title, IMDb_Rating FROM rating;", conn)
-    #5.
+    
+    # Query #4 (SELECT): Load number of ratings table
     num_df = pd.read_sql_query("SELECT Title, Number_of_Ratings FROM num_ratings;", conn)
-    #6.
+    
+    # Query #5 (SELECT): Load synopsis table
     synopsis_df = pd.read_sql_query("SELECT Title, Synopsis FROM synopsis;", conn)
 
-    # Optional tables (category, character) – may not have entries for every title
-    try:
-        category_df = pd.read_sql_query(
-            #7.
-            "SELECT Title, Category AS category FROM category;", conn
-        )
-    except Exception:
-        category_df = pd.DataFrame(columns=["Title", "category"])
-
-    try:
-        char_df = pd.read_sql_query(
-            #8.
-            "SELECT Title, Character AS character FROM character;", conn
-        )
-    except Exception:
-        char_df = pd.DataFrame(columns=["Title", "character"])
-
-    metadata = (
-        title_df
-        .merge(year_df, on="Title", how="left")
-        .merge(genre_df, on="Title", how="left")
-        .merge(rating_df, on="Title", how="left")
-        .merge(num_df, on="Title", how="left")
-        .merge(synopsis_df, on="Title", how="left")
-        .merge(category_df, on="Title", how="left")
-        .merge(char_df, on="Title", how="left")
+    # ---- Aggregated many-to-many attributes (GROUP_CONCAT per Title) ----
+    genre_df = pd.read_sql_query(
+        # Query #6 (SELECT + JOIN + GROUP BY): Aggregate movie genres (M:N)        
+        """
+        SELECT mg.Title,
+               GROUP_CONCAT(DISTINCT gr.GenreName) AS Genres
+        FROM movie_genre mg
+        JOIN genre_ref gr ON mg.GenreID = gr.GenreID
+        GROUP BY mg.Title;
+        """,
+        conn,
     )
 
-    # Load storyline vectors
-    #9.
+    category_df = pd.read_sql_query(
+        # Query #7 (SELECT + JOIN + GROUP BY): Aggregate movie categories (M:N)
+        """
+        SELECT mc.Title,
+               GROUP_CONCAT(DISTINCT cr.CategoryName) AS Categories
+        FROM movie_category mc
+        JOIN category_ref cr ON mc.CategoryID = cr.CategoryID
+        GROUP BY mc.Title;
+        """,
+        conn,
+    )
+
+    char_df = pd.read_sql_query(
+        # Query #8 (SELECT + JOIN + GROUP BY): Aggregate movie characters (M:N)
+        """
+        SELECT mch.Title,
+               GROUP_CONCAT(DISTINCT chr.CharacterName) AS Characters
+        FROM movie_character mch
+        JOIN character_ref chr ON mch.CharacterID = chr.CharacterID
+        GROUP BY mch.Title;
+        """,
+        conn,
+    )
+
+    job_df = pd.read_sql_query(
+        # Query #9 (SELECT + JOIN + GROUP BY): Aggregate job roles (M:N)
+        """
+        SELECT mj.Title,
+               GROUP_CONCAT(DISTINCT jr.JobName) AS Jobs
+        FROM movie_job mj
+        JOIN job_ref jr ON mj.JobID = jr.JobID
+        GROUP BY mj.Title;
+        """,
+        conn,
+    )
+
+    # ---- Load storyline vectors ----
+    # Query #10 (SELECT): Load storyline embeddings
     vectors_df = pd.read_sql_query("SELECT * FROM storyline_vector;", conn)
     conn.close()
 
@@ -121,11 +146,28 @@ def load_data_from_db():
     vectors = vectors_df.drop(columns=["Title"]).to_numpy(dtype=np.float32)
     vectors /= np.clip(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-9, None)
 
+    # ---- Build metadata aligned to embeddings (same Title order) ----
+    base = pd.DataFrame({"Title": titles})
+
+    meta_core = (
+        title_df
+        .merge(year_df, on="Title", how="left")
+        .merge(rating_df, on="Title", how="left")
+        .merge(num_df, on="Title", how="left")
+        .merge(synopsis_df, on="Title", how="left")
+        .merge(genre_df, on="Title", how="left")
+        .merge(category_df, on="Title", how="left")
+        .merge(char_df, on="Title", how="left")
+        .merge(job_df, on="Title", how="left")
+    )
+
+    metadata = base.merge(meta_core, on="Title", how="left")
+
     return metadata, titles, vectors
 
 
 # ---------------------------------------------------------
-# HELPER: POSTER FETCH
+# HELPER: POSTER FETCH (TMDB)
 # ---------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def get_poster_tmdb(title: str) -> str:
@@ -172,10 +214,14 @@ def render_movie_grid(df: pd.DataFrame, similarity_scores=None, max_cols: int = 
             title = row.get("Primary_Title", row.get("Title", "Unknown Title"))
             year = row.get("Release_Year", "")
             synopsis = row.get("Synopsis", "No synopsis available.")
-            genre = row.get("Genre", "N/A")
+
+            # Support both 'Genre' and 'Genres' column names
+            genre = row.get("Genres", row.get("Genre", "N/A"))
+            categories = row.get("Categories", "N/A")
+            characters = row.get("Characters", "N/A")
+            jobs = row.get("Jobs", "N/A")
+
             rating = row.get("IMDb_Rating", None)
-            category = row.get("category", "N/A")
-            character = row.get("character", "N/A")
             num_ratings = row.get("Number_of_Ratings", None)
 
             sim_display = None
@@ -197,9 +243,10 @@ def render_movie_grid(df: pd.DataFrame, similarity_scores=None, max_cols: int = 
                         st.markdown(f"**👥 Ratings Count:** {num_ratings}")
                     if sim_display is not None:
                         st.markdown(f"**🧮 Similarity:** {sim_display}%")
-                    st.markdown(f"**🎭 Genre:** {genre}")
-                    st.markdown(f"**📂 Category:** {category}")
-                    st.markdown(f"**🎙️ Character / Job:** {character}")
+                    st.markdown(f"**🎭 Genres:** {genre}")
+                    st.markdown(f"**📂 Categories:** {categories}")
+                    st.markdown(f"**🎙️ Characters:** {characters}")
+                    st.markdown(f"**💼 Jobs:** {jobs}")
                     st.markdown(f"**📖 Synopsis:** {synopsis}")
 
 
@@ -216,15 +263,15 @@ st.sidebar.title("🔍 Navigation")
 page = st.sidebar.radio(
     "Go to:",
     [
-        "🎬 Storyline Search",
-        "🎭 Browse by Genre",
-        "⭐ Top Rated Movies",
-        "📅 Year Explorer",
-        "📈 Popular Movies (Most Ratings)",
-        "➕ Add to the Catalogue",
-        "🛠️ Movie Record Manager",
-        "📊 Analytics & Longest Synopses",
-        "🎲 Random Movie",
+        "🎬",
+        "🎭",
+        "⭐",
+        "📅",
+        "📈",
+        "📝",
+        "⚠️",
+        "📊",
+        "🎲",
     ],
 )
 
@@ -232,9 +279,9 @@ page = st.sidebar.radio(
 # ---------------------------------------------------------
 # PAGE: STORYLINE SEARCH (MAIN FEATURE)
 # ---------------------------------------------------------
-if page == "🎬 Storyline Search":
-    st.title("🎬 AI Movie Search (GTE-Base-EN Only)")
-    st.write("Find similar movies by storyline — using 768-dim GTE embeddings from the database.")
+if page == "🎬":
+    st.title("🎬 AI Movie Search")
+    st.write("Find similar movies by storyline.")
 
     query = st.text_area(
         "Enter your movie storyline:",
@@ -269,17 +316,19 @@ if page == "🎬 Storyline Search":
             results_df = imdb.iloc[top_idx].copy()
             render_movie_grid(results_df, similarity_scores=sim_map, max_cols=5)
 
-    st.caption("CSE111 — Richard Camacho, Akshaya Natarajan & Ailisha Shukla · Fixed GTE Embeddings")
+    st.caption("CSE111 — Richard Camacho, Akshaya Natarajan & Ailisha Shukla")
 
 
 # ---------------------------------------------------------
 # PAGE: BROWSE BY GENRE
 # ---------------------------------------------------------
-elif page == "🎭 Browse by Genre":
+elif page == "🎭":
     st.title("🎭 Browse by Genre")
 
-    # Get list of distinct genres
-    genres_df = run_sql("SELECT DISTINCT Genre FROM genre WHERE Genre IS NOT NULL AND Genre <> '' ORDER BY Genre;")
+    # Query #11 (SELECT DISTINCT): Get list of all genres    
+    genres_df = run_sql(
+        "SELECT DISTINCT GenreName AS Genre FROM genre_ref ORDER BY Genre;"
+    )
     genre_list = genres_df["Genre"].tolist()
 
     genre = st.selectbox("Select a genre:", ["(choose)"] + genre_list)
@@ -287,17 +336,55 @@ elif page == "🎭 Browse by Genre":
     if genre != "(choose)":
         st.subheader(f"Movies in Genre: {genre}")
         df = run_sql(
-            #10.
+            # Query #12 (SELECT + JOINs + subqueries): Get movies for selected genre
             """
-            SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre, r.IMDb_Rating,
-                   n.Number_of_Ratings, s.Synopsis
+            SELECT
+                t.Title,
+                t.Primary_Title,
+                ry.Release_Year,
+                gagg.Genres AS Genres,
+                cagg.Categories AS Categories,
+                chagg.Characters AS Characters,
+                jagg.Jobs AS Jobs,
+                r.IMDb_Rating,
+                n.Number_of_Ratings,
+                s.Synopsis
             FROM title t
-            JOIN genre g ON t.Title = g.Title
+            JOIN movie_genre mg ON t.Title = mg.Title
+            JOIN genre_ref gr ON mg.GenreID = gr.GenreID
             LEFT JOIN release_year ry ON t.Title = ry.Title
             LEFT JOIN rating r ON t.Title = r.Title
             LEFT JOIN num_ratings n ON t.Title = n.Title
             LEFT JOIN synopsis s ON t.Title = s.Title
-            WHERE g.Genre = ?
+            LEFT JOIN (
+                SELECT mg2.Title,
+                       GROUP_CONCAT(DISTINCT gr2.GenreName) AS Genres
+                FROM movie_genre mg2
+                JOIN genre_ref gr2 ON mg2.GenreID = gr2.GenreID
+                GROUP BY mg2.Title
+            ) AS gagg ON t.Title = gagg.Title
+            LEFT JOIN (
+                SELECT mc.Title,
+                       GROUP_CONCAT(DISTINCT cr.CategoryName) AS Categories
+                FROM movie_category mc
+                JOIN category_ref cr ON mc.CategoryID = cr.CategoryID
+                GROUP BY mc.Title
+            ) AS cagg ON t.Title = cagg.Title
+            LEFT JOIN (
+                SELECT mch.Title,
+                       GROUP_CONCAT(DISTINCT chr.CharacterName) AS Characters
+                FROM movie_character mch
+                JOIN character_ref chr ON mch.CharacterID = chr.CharacterID
+                GROUP BY mch.Title
+            ) AS chagg ON t.Title = chagg.Title
+            LEFT JOIN (
+                SELECT mj.Title,
+                       GROUP_CONCAT(DISTINCT jr.JobName) AS Jobs
+                FROM movie_job mj
+                JOIN job_ref jr ON mj.JobID = jr.JobID
+                GROUP BY mj.Title
+            ) AS jagg ON t.Title = jagg.Title
+            WHERE gr.GenreName = ?
             ORDER BY r.IMDb_Rating DESC;
             """,
             params=(genre,),
@@ -308,24 +395,60 @@ elif page == "🎭 Browse by Genre":
 # ---------------------------------------------------------
 # PAGE: TOP RATED MOVIES
 # ---------------------------------------------------------
-elif page == "⭐ Top Rated Movies":
+elif page == "⭐":
     st.title("⭐ Top Rated Movies")
 
     min_rating = st.slider("Minimum IMDb rating", 0.0, 10.0, 8.5, 0.1)
     limit = st.slider("How many movies to show?", 5, 50, 20)
 
     if st.button("Show Top Rated"):
+        # Query #13 (SELECT + JOINs): Get movies above a rating threshold
         df = run_sql(
             f"""
-            #11.
-            SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre,
-                   r.IMDb_Rating, n.Number_of_Ratings, s.Synopsis
+            SELECT
+                t.Title,
+                t.Primary_Title,
+                ry.Release_Year,
+                gagg.Genres AS Genres,
+                cagg.Categories AS Categories,
+                chagg.Characters AS Characters,
+                jagg.Jobs AS Jobs,
+                r.IMDb_Rating,
+                n.Number_of_Ratings,
+                s.Synopsis
             FROM title t
             JOIN rating r ON t.Title = r.Title
             LEFT JOIN release_year ry ON t.Title = ry.Title
-            LEFT JOIN genre g ON t.Title = g.Title
             LEFT JOIN num_ratings n ON t.Title = n.Title
             LEFT JOIN synopsis s ON t.Title = s.Title
+            LEFT JOIN (
+                SELECT mg.Title,
+                       GROUP_CONCAT(DISTINCT gr.GenreName) AS Genres
+                FROM movie_genre mg
+                JOIN genre_ref gr ON mg.GenreID = gr.GenreID
+                GROUP BY mg.Title
+            ) AS gagg ON t.Title = gagg.Title
+            LEFT JOIN (
+                SELECT mc.Title,
+                       GROUP_CONCAT(DISTINCT cr.CategoryName) AS Categories
+                FROM movie_category mc
+                JOIN category_ref cr ON mc.CategoryID = cr.CategoryID
+                GROUP BY mc.Title
+            ) AS cagg ON t.Title = cagg.Title
+            LEFT JOIN (
+                SELECT mch.Title,
+                       GROUP_CONCAT(DISTINCT chr.CharacterName) AS Characters
+                FROM movie_character mch
+                JOIN character_ref chr ON mch.CharacterID = chr.CharacterID
+                GROUP BY mch.Title
+            ) AS chagg ON t.Title = chagg.Title
+            LEFT JOIN (
+                SELECT mj.Title,
+                       GROUP_CONCAT(DISTINCT jr.JobName) AS Jobs
+                FROM movie_job mj
+                JOIN job_ref jr ON mj.JobID = jr.JobID
+                GROUP BY mj.Title
+            ) AS jagg ON t.Title = jagg.Title
             WHERE r.IMDb_Rating >= ?
             ORDER BY r.IMDb_Rating DESC
             LIMIT {limit};
@@ -338,24 +461,64 @@ elif page == "⭐ Top Rated Movies":
 # ---------------------------------------------------------
 # PAGE: YEAR EXPLORER
 # ---------------------------------------------------------
-elif page == "📅 Year Explorer":
+elif page == "📅":
     st.title("📅 Explore Movies by Release Year")
 
-    years_df = run_sql("SELECT DISTINCT Release_Year FROM release_year WHERE Release_Year IS NOT NULL ORDER BY Release_Year;")
+    # Query #14 (SELECT DISTINCT): Get all available release years
+    years_df = run_sql(
+        "SELECT DISTINCT Release_Year FROM release_year WHERE Release_Year IS NOT NULL ORDER BY Release_Year;"
+    )
     years = years_df["Release_Year"].tolist()
     if years:
         year = st.selectbox("Select a year:", years)
+        # Query #15 (SELECT + JOINs): Get movies released in selected year
         df = run_sql(
             #12.
             """
-            SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre, r.IMDb_Rating,
-                   n.Number_of_Ratings, s.Synopsis
+            SELECT
+                t.Title,
+                t.Primary_Title,
+                ry.Release_Year,
+                gagg.Genres AS Genres,
+                cagg.Categories AS Categories,
+                chagg.Characters AS Characters,
+                jagg.Jobs AS Jobs,
+                r.IMDb_Rating,
+                n.Number_of_Ratings,
+                s.Synopsis
             FROM release_year ry
             JOIN title t ON ry.Title = t.Title
-            LEFT JOIN genre g ON t.Title = g.Title
             LEFT JOIN rating r ON t.Title = r.Title
             LEFT JOIN num_ratings n ON t.Title = n.Title
             LEFT JOIN synopsis s ON t.Title = s.Title
+            LEFT JOIN (
+                SELECT mg.Title,
+                       GROUP_CONCAT(DISTINCT gr.GenreName) AS Genres
+                FROM movie_genre mg
+                JOIN genre_ref gr ON mg.GenreID = gr.GenreID
+                GROUP BY mg.Title
+            ) AS gagg ON t.Title = gagg.Title
+            LEFT JOIN (
+                SELECT mc.Title,
+                       GROUP_CONCAT(DISTINCT cr.CategoryName) AS Categories
+                FROM movie_category mc
+                JOIN category_ref cr ON mc.CategoryID = cr.CategoryID
+                GROUP BY mc.Title
+            ) AS cagg ON t.Title = cagg.Title
+            LEFT JOIN (
+                SELECT mch.Title,
+                       GROUP_CONCAT(DISTINCT chr.CharacterName) AS Characters
+                FROM movie_character mch
+                JOIN character_ref chr ON mch.CharacterID = chr.CharacterID
+                GROUP BY mch.Title
+            ) AS chagg ON t.Title = chagg.Title
+            LEFT JOIN (
+                SELECT mj.Title,
+                       GROUP_CONCAT(DISTINCT jr.JobName) AS Jobs
+                FROM movie_job mj
+                JOIN job_ref jr ON mj.JobID = jr.JobID
+                GROUP BY mj.Title
+            ) AS jagg ON t.Title = jagg.Title
             WHERE ry.Release_Year = ?
             ORDER BY r.IMDb_Rating DESC;
             """,
@@ -369,49 +532,276 @@ elif page == "📅 Year Explorer":
 # ---------------------------------------------------------
 # PAGE: POPULAR MOVIES (MOST RATINGS)
 # ---------------------------------------------------------
-elif page == "📈 Popular Movies (Most Ratings)":
+elif page == "📈":
     st.title("📈 Most Popular Movies (by Number of Ratings)")
 
     limit = st.slider("How many movies to show?", 5, 50, 20)
 
     if st.button("Show Most Popular"):
+        # Query #16 (SELECT + JOINs): Sort movies by number of ratings
         df = run_sql(
             #13.
             f"""
-            SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre,
-                   r.IMDb_Rating, n.Number_of_Ratings, s.Synopsis
+            SELECT
+                t.Title,
+                t.Primary_Title,
+                ry.Release_Year,
+                gagg.Genres AS Genres,
+                cagg.Categories AS Categories,
+                chagg.Characters AS Characters,
+                jagg.Jobs AS Jobs,
+                r.IMDb_Rating,
+                n.Number_of_Ratings,
+                s.Synopsis
             FROM title t
             JOIN num_ratings n ON t.Title = n.Title
             LEFT JOIN rating r ON t.Title = r.Title
             LEFT JOIN release_year ry ON t.Title = ry.Title
-            LEFT JOIN genre g ON t.Title = g.Title
             LEFT JOIN synopsis s ON t.Title = s.Title
+            LEFT JOIN (
+                SELECT mg.Title,
+                       GROUP_CONCAT(DISTINCT gr.GenreName) AS Genres
+                FROM movie_genre mg
+                JOIN genre_ref gr ON mg.GenreID = gr.GenreID
+                GROUP BY mg.Title
+            ) AS gagg ON t.Title = gagg.Title
+            LEFT JOIN (
+                SELECT mc.Title,
+                       GROUP_CONCAT(DISTINCT cr.CategoryName) AS Categories
+                FROM movie_category mc
+                JOIN category_ref cr ON mc.CategoryID = cr.CategoryID
+                GROUP BY mc.Title
+            ) AS cagg ON t.Title = cagg.Title
+            LEFT JOIN (
+                SELECT mch.Title,
+                       GROUP_CONCAT(DISTINCT chr.CharacterName) AS Characters
+                FROM movie_character mch
+                JOIN character_ref chr ON mch.CharacterID = chr.CharacterID
+                GROUP BY mch.Title
+            ) AS chagg ON t.Title = chagg.Title
+            LEFT JOIN (
+                SELECT mj.Title,
+                       GROUP_CONCAT(DISTINCT jr.JobName) AS Jobs
+                FROM movie_job mj
+                JOIN job_ref jr ON mj.JobID = jr.JobID
+                GROUP BY mj.Title
+            ) AS jagg ON t.Title = jagg.Title
             ORDER BY n.Number_of_Ratings DESC
             LIMIT {limit};
             """
         )
         render_movie_grid(df)
 
+
+# ---------------------------------------------------------
+# PAGE: KEYWORD SYNOPSIS SEARCH
+# ---------------------------------------------------------
+elif page == "📝":
+    st.title("📝 Synopsis CRUD (Create, Read, Update, Delete)")
+
+    st.write("This page allows you to manage the synopsis table.")
+
+    # Load all titles
+    # Query #17 (SELECT): Get title list for CRUD menu
+    all_titles_df = run_sql("SELECT Title, Primary_Title FROM title ORDER BY Primary_Title;")
+    title_list = all_titles_df["Title"].tolist()
+    title_display = all_titles_df["Primary_Title"].tolist()
+
+    # Helper: EXECUTE non-query SQL (INSERT/UPDATE/DELETE)
+    def exec_sql(query, params=None):
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(query, params or [])
+        conn.commit()
+        conn.close()
+
+    tabs = st.tabs(["➕ Create", "📖 Read", "✏️ Update", "🗑️ Delete"])
+
+
+    # ---------------------------------------------------------
+    # CREATE (INSERT)
+    # ---------------------------------------------------------
+    with tabs[0]:
+        st.subheader("➕ Add New Synopsis")
+        idx = st.selectbox("Select movie:", range(len(title_list)),
+                           format_func=lambda i: f"{title_display[i]} ({title_list[i]})")
+
+        new_synopsis = st.text_area("Enter new synopsis:")
+
+        if st.button("Insert Synopsis"):
+            # Query #18 (INSERT): Insert a new synopsis (CREATE)
+            exec_sql(
+                """
+                INSERT INTO synopsis (Title, Synopsis)
+                VALUES (?, ?)
+                """,
+                params=(title_list[idx], new_synopsis),
+            )
+            st.success("✅ Synopsis inserted successfully!")
+
+    # ---------------------------------------------------------
+    # READ (SELECT)
+    # ---------------------------------------------------------
+    with tabs[1]:
+        st.subheader("📖 View All Synopses")
+
+        # Query #19 (SELECT): Display all synopses (READ)
+        df = run_sql("""
+            SELECT t.Title, t.Primary_Title, s.Synopsis
+            FROM synopsis s
+            JOIN title t ON s.Title = t.Title
+            ORDER BY t.Primary_Title;
+        """)
+
+        st.dataframe(df)
+
+    # ---------------------------------------------------------
+    # UPDATE (UPDATE)
+    # ---------------------------------------------------------
+    with tabs[2]:
+        st.subheader("✏️ Update Existing Synopsis")
+
+        # Query #20 (SELECT): Load synopses for editing (READ)
+        syn_df = run_sql("""
+            SELECT t.Title, t.Primary_Title, s.Synopsis
+            FROM synopsis s
+            JOIN title t ON s.Title = t.Title
+            ORDER BY t.Primary_Title;
+        """)
+
+        if not syn_df.empty:
+            idx = st.selectbox(
+                "Select synopsis to update:",
+                range(len(syn_df)),
+                format_func=lambda i: syn_df.iloc[i]["Primary_Title"],
+            )
+
+            old_syn = syn_df.iloc[idx]["Synopsis"]
+            title_to_update = syn_df.iloc[idx]["Title"]
+
+            new_syn = st.text_area("Edit synopsis:", value=old_syn)
+
+            if st.button("Update Synopsis"):
+                # Query #21 (UPDATE): Update an existing synopsis
+                exec_sql(
+                    """
+                    UPDATE synopsis
+                    SET Synopsis = ?
+                    WHERE Title = ?
+                    """,
+                    params=(new_syn, title_to_update),
+                )
+                st.success("✅ Synopsis updated successfully!")
+        else:
+            st.info("No synopses found to update.")
+
+    # ---------------------------------------------------------
+    # DELETE (DELETE)
+    # ---------------------------------------------------------
+    with tabs[3]:
+        st.subheader("🗑️ Delete Synopsis")
+
+        # Query #22 (SELECT): Load synopses for deletion (READ)
+        del_df = run_sql("""
+            SELECT t.Title, t.Primary_Title
+            FROM synopsis s
+            JOIN title t ON s.Title = t.Title
+            ORDER BY t.Primary_Title;
+        """)
+
+        if not del_df.empty:
+            idx = st.selectbox(
+                "Select synopsis to delete:",
+                range(len(del_df)),
+                format_func=lambda i: del_df.iloc[i]["Primary_Title"],
+            )
+
+            title_to_delete = del_df.iloc[idx]["Title"]
+
+            # Query #23 (DELETE): Remove synopsis for selected movie
+            if st.button("Delete Synopsis"):
+                exec_sql(
+                    """
+                    DELETE FROM synopsis
+                    WHERE Title = ?
+                    """,
+                    params=(title_to_delete,),
+                )
+                st.warning("🗑️ Synopsis deleted successfully!")
+        else:
+            st.info("No synopses available for deletion.")
+
+
+# ---------------------------------------------------------
+# PAGE: MISSING DATA REPORT
+# ---------------------------------------------------------
+elif page == "⚠️":
+    st.title("⚠️ Data Quality / Missing Data Report")
+
+    tab1, tab2, tab3 = st.tabs(["Missing Synopsis", "Missing Ratings", "No Genres"])
+
+    with tab1:
+        st.subheader("Movies with Missing Synopsis")
+        # Query #24 (SELECT + LEFT JOIN): Find movies missing synopsis
+        df1 = run_sql(
+            """
+            SELECT t.Title, t.Primary_Title
+            FROM title t
+            LEFT JOIN synopsis s ON t.Title = s.Title
+            WHERE s.Synopsis IS NULL OR s.Synopsis = '';
+            """
+        )
+        st.dataframe(df1)
+
+    with tab2:
+        st.subheader("Movies with Missing IMDb Rating")
+        # Query #25 (SELECT + LEFT JOIN): Movies missing IMDb ratings
+        df2 = run_sql(
+            """
+            SELECT t.Title, t.Primary_Title
+            FROM title t
+            LEFT JOIN rating r ON t.Title = r.Title
+            WHERE r.IMDb_Rating IS NULL;
+            """
+        )
+        st.dataframe(df2)
+
+    with tab3:
+        st.subheader("Movies without any Genre entries")
+        # Query #26 (SELECT + LEFT JOIN): Movies with no genre entries
+        df3 = run_sql(
+            """
+            SELECT t.Title, t.Primary_Title
+            FROM title t
+            LEFT JOIN movie_genre mg ON t.Title = mg.Title
+            WHERE mg.GenreID IS NULL;
+            """
+        )
+        st.dataframe(df3)
+
+
 # ---------------------------------------------------------
 # PAGE: ANALYTICS & LONGEST SYNOPSES
 # ---------------------------------------------------------
-elif page == "📊 Analytics & Longest Synopses":
+elif page == "📊":
     st.title("📊 Analytics & Longest Synopses")
 
     st.subheader("1. Movies with Multiple Genres")
+    # Query #27 (SELECT + GROUP BY + HAVING): Movies with multiple genres
     df_multi = run_sql(
         #14. 
         """
-        SELECT Title, COUNT(*) AS GenreCount
-        FROM genre
+        SELECT Title, COUNT(DISTINCT GenreID) AS GenreCount
+        FROM movie_genre
         GROUP BY Title
-        HAVING COUNT(*) > 1
+        HAVING COUNT(DISTINCT GenreID) > 1
         ORDER BY GenreCount DESC;
         """
     )
     st.dataframe(df_multi)
 
     st.subheader("2. Movies Newer Than Average Release Year")
+    # Query #28 (SELECT + subquery): Movies newer than average year
     df_newer = run_sql(
         #15.
         """
@@ -426,6 +816,7 @@ elif page == "📊 Analytics & Longest Synopses":
     st.dataframe(df_newer)
 
     st.subheader("3. Movies Above Average IMDb Rating")
+    # Query #29 (SELECT + subquery): Movies above average rating
     df_above_avg = run_sql(
         #16.
         """
@@ -440,6 +831,7 @@ elif page == "📊 Analytics & Longest Synopses":
     st.dataframe(df_above_avg)
 
     st.subheader("4. Top 10 Longest Synopses")
+    # Query #30 (SELECT + LENGTH + LIMIT): Top 10 longest synopses
     df_long = run_sql(
         #17.
         """
@@ -457,21 +849,58 @@ elif page == "📊 Analytics & Longest Synopses":
 # ---------------------------------------------------------
 # PAGE: RANDOM MOVIE
 # ---------------------------------------------------------
-elif page == "🎲 Random Movie":
+elif page == "🎲":
     st.title("🎲 Random Movie Generator")
 
     if st.button("Give me a random movie"):
+        # Query #31 (SELECT + RANDOM): Random movie selection
         df = run_sql(
             #18.
             """
-            SELECT t.Title, t.Primary_Title, ry.Release_Year, g.Genre,
-                   r.IMDb_Rating, n.Number_of_Ratings, s.Synopsis
+            SELECT
+                t.Title,
+                t.Primary_Title,
+                ry.Release_Year,
+                gagg.Genres AS Genres,
+                cagg.Categories AS Categories,
+                chagg.Characters AS Characters,
+                jagg.Jobs AS Jobs,
+                r.IMDb_Rating,
+                n.Number_of_Ratings,
+                s.Synopsis
             FROM title t
             LEFT JOIN release_year ry ON t.Title = ry.Title
-            LEFT JOIN genre g ON t.Title = g.Title
             LEFT JOIN rating r ON t.Title = r.Title
             LEFT JOIN num_ratings n ON t.Title = n.Title
             LEFT JOIN synopsis s ON t.Title = s.Title
+            LEFT JOIN (
+                SELECT mg.Title,
+                       GROUP_CONCAT(DISTINCT gr.GenreName) AS Genres
+                FROM movie_genre mg
+                JOIN genre_ref gr ON mg.GenreID = gr.GenreID
+                GROUP BY mg.Title
+            ) AS gagg ON t.Title = gagg.Title
+            LEFT JOIN (
+                SELECT mc.Title,
+                       GROUP_CONCAT(DISTINCT cr.CategoryName) AS Categories
+                FROM movie_category mc
+                JOIN category_ref cr ON mc.CategoryID = cr.CategoryID
+                GROUP BY mc.Title
+            ) AS cagg ON t.Title = cagg.Title
+            LEFT JOIN (
+                SELECT mch.Title,
+                       GROUP_CONCAT(DISTINCT chr.CharacterName) AS Characters
+                FROM movie_character mch
+                JOIN character_ref chr ON mch.CharacterID = chr.CharacterID
+                GROUP BY mch.Title
+            ) AS chagg ON t.Title = chagg.Title
+            LEFT JOIN (
+                SELECT mj.Title,
+                       GROUP_CONCAT(DISTINCT jr.JobName) AS Jobs
+                FROM movie_job mj
+                JOIN job_ref jr ON mj.JobID = jr.JobID
+                GROUP BY mj.Title
+            ) AS jagg ON t.Title = jagg.Title
             ORDER BY RANDOM()
             LIMIT 1;
             """
