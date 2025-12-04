@@ -25,7 +25,7 @@ Features:
 - Caches data for faster performance
 
 Developers
-CSE111 Project by:
+for this CSE 111 Project:
 Richard Camacho,
 Akshaya Natarajan,
 Ailisha Shukla
