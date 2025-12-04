@@ -1,4 +1,4 @@
-AI Movie Search (AIMovieSerch)
+AI Movie Search (AIMovieSearch)
 
 AI Movie Search is a Streamlit web app that uses FAISS and TF-IDF to find movies with similar storylines.
 It also includes a spell checker and shows movie posters from TMDB.
@@ -26,6 +26,6 @@ Caches data for faster performance
 
 Developers
 CSE111 Project by:
-Richard Camacho
-Akshaya Natarajan
+Richard Camacho,
+Akshaya Natarajan,
 Ailisha Shukla
